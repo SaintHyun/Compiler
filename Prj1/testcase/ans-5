@@ -1,0 +1,2 @@
+Variable is int type, but assigning bool type value
+Function must return int type, but statement is returning void type

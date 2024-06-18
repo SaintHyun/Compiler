@@ -1,0 +1,17 @@
+int g;
+
+int main(void) {
+  int i;
+  bool b;
+
+  i = 0;
+  b = true;
+
+  while (b) {
+    g = x;   
+    i = i * 2;
+    b = (i * 2) <= 100;
+  }
+
+  return 0;
+}

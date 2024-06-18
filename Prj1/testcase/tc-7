@@ -1,0 +1,22 @@
+int f(int x) { 
+  return x;
+}
+
+int g(int f) {
+  int n;
+  n = f + 1;
+  return n;
+}
+
+int h(void) {
+  int i;
+  bool n;
+  i = x;
+  i = f(0);
+  n = true;
+  while (i < 10) {
+    n = n + false;
+    i = g(i);
+  }
+  return i;
+}

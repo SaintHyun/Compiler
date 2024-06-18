@@ -1,0 +1,11 @@
+int main(void) {
+  int x;
+  int y;
+  x = 2;
+  y = 3;
+  if ((5 < 3) == true) {
+    x = 5;
+    y = (x == 2);
+  }
+  return;
+}

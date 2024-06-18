@@ -1,0 +1,23 @@
+int x;
+
+bool is_false(bool b) {
+  return !b;
+}
+  
+int f(int n) {
+  if (true == n) {
+    n = n + 1;
+  }
+  return n;
+}
+
+int g(int n) {
+  if (n >= 5 ) {
+    x = n + 1;
+  } else {
+    x = is_false(n >= 5);
+  }
+  return 0;
+}
+
+

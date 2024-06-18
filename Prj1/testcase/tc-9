@@ -1,0 +1,17 @@
+int a;
+
+int f(int i) {
+  int n;
+  n = -i;
+  if (n != 10) {
+    return 0;
+  } else {
+    return false;
+  }
+}
+
+bool g(bool b) {
+  f(3 == 4); 
+  a = 10;
+  return !b;
+}

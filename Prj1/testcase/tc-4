@@ -1,0 +1,18 @@
+bool f(int n) { 
+  bool x;
+  x = n && true;
+  return x;
+}
+
+int main(void) {
+  int x;
+  int y;
+  x = 2;
+  y = 3;
+  if (x == y) {
+    f = true;
+  } else {
+    y = !(false == true);
+  }
+  return 0;
+}

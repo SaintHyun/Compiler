@@ -1,0 +1,2 @@
+Operand type mismatch (no detailed information)
+Variable is int type, but assigning bool type value
