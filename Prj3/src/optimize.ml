@@ -251,6 +251,66 @@ let print_rdmap rdmap =
   ) rdmap
 
 
+let rec find_RD block reg rd_set = 
+  let flag, value = RDSet.fold (fun x (flag, value) -> 
+    match x with
+    | Set (r, i) ->
+      if r = reg then (true, i) else (flag, value)
+    | Copy (_, r) | BinOp (r, _, _, _) | UnOp (r, _, _) ->
+      if r = reg then (false, value) else (flag, value)
+    | _ -> (flag, value)
+  ) rd_set (false, ImmInt 0) in
+  let flag, value = RDSet.fold (fun x (flag, value) -> 
+    match x with
+    | Copy (_, r) | BinOp (r, _, _, _) | UnOp (r, _, _) -> if r = reg then (false, value) else (flag, value)
+    | _ -> (flag, value)
+  ) rd_set (flag, value) in
+  flag, value
+
+let rec find_block basic_blocks instruction = 
+  match basic_blocks with
+  | [] -> []
+  | head :: tail ->
+    if List.mem instruction head then head
+    else find_block tail instruction
+
+let rec optimize_block block cur_block rd_set =
+  match cur_block with
+  | [] -> []
+  | head :: tail -> 
+    match head with
+      | Copy (r, r2) ->
+        let rd_block = RDMap.find block rd_set in (* head의 rd를 찾음 *)
+        let flag, value = find_RD block r rd_block in
+        if flag = true then [Set (r2, value)] @ optimize_block block tail rd_set
+        else head :: optimize_block block tail rd_set
+
+      | BinOp (r1, r2, Reg r, r3) -> 
+        let rd_block = RDMap.find block rd_set in (* head의 rd를 찾음 *)
+        let flag, value = find_RD block r rd_block in
+        if flag = true then [BinOp (r1, r2, Imm value, r3)] @ optimize_block block tail rd_set
+        else head :: optimize_block block tail rd_set
+
+      | BinOp (r1, r2, r3, Reg r) -> 
+        let rd_block = RDMap.find block rd_set in (* head의 rd를 찾음 *)
+        let flag, value = find_RD block r rd_block in
+        if flag =true then [BinOp (r1, r2, r3, Imm value)] @ optimize_block block tail rd_set
+        else head :: optimize_block block tail rd_set
+
+      | UnOp (r1, r2, Reg r) ->
+        let rd_block = RDMap.find block rd_set in (* head의 rd를 찾음 *)
+        let flag, value = find_RD block r rd_block in
+        if flag = true then [UnOp (r1, r2, Imm value)] @ optimize_block block tail rd_set
+        else head :: optimize_block block tail rd_set
+
+      | _ -> head :: optimize_block block tail rd_set
+
+let rec optimize_RD basic_blocks rd_set = 
+  match basic_blocks with
+  | [] -> []
+  | head :: tail ->
+    optimize_block head head rd_set @ optimize_RD tail rd_set
+
 let run (ir: ir_code): ir_code =
   let fname, arg_regs, ir_list = ir in
   let basic_blocks = const_blocks ir_list in
@@ -259,5 +319,6 @@ let run (ir: ir_code): ir_code =
   let rd_set = compute_RDSet cfg basic_blocks rd_set in
   (* List.iter print_block basic_blocks; *)
   (* print_cfg cfg; *)
-  print_rdmap rd_set;
-  ir
+  (* print_rdmap rd_set; *)
+  let ir_RD = optimize_RD basic_blocks rd_set in
+  (fname, arg_regs, ir_RD)
