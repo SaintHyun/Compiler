@@ -2,6 +2,8 @@ open Program
 open Ir
 open Printf
 
+exception Error
+
 (* Example code to illustrate how to define your own custom type and define a
  * Set to store them. *)
 
@@ -17,7 +19,6 @@ let add_edge g v1 v2 =
 (* Reaching definition (you can fix the following definition, of course). *)
 type rdef = instr
 
-(* Now you can define "set of reaching definition" as follow. *)
 module RDSet = Set.Make(struct
   type t = instr
   let compare = Pervasives.compare
@@ -28,135 +29,175 @@ module RDMap = Map.Make(struct
   let compare = Pervasives.compare
 end)
 
-let rec make_block b instrs = 
-  match instrs with
-  | [] -> b, []
-  | head_instr :: tail_instrs ->
-    (match head_instr with
-    | Goto _ | GotoIf _ | GotoIfNot _ | Ret _ ->
-      let new_block = b @ [head_instr] in
-      new_block, tail_instrs
-    | Label _ -> 
-      if b <> [] then b, instrs
-      else 
-        let new_block = b @ [head_instr] in
-        make_block new_block tail_instrs
-    | _ ->
-      let new_block = b @ [head_instr] in
-      make_block new_block tail_instrs
-    )
+module AESet = Set.Make(struct
+  type t = instr
+  let compare = Pervasives.compare
+end)
 
-let rec const_blocks (ir_list: instr list) = 
-  match ir_list with
+module AEMap = Map.Make(struct
+  type t = (instr * instr list)
+  let compare = Pervasives.compare
+end)
+
+module LVSet = Set.Make(struct
+  type t = register
+  let compare = Pervasives.compare
+end)
+
+module LVMap = Map.Make(struct
+  type t = (instr * instr list)
+  let compare = Pervasives.compare
+end)
+
+let rdmap_equal map1 map2 =
+  RDMap.equal (fun set1 set2 -> RDSet.equal set1 set2) map1 map2
+
+let aemap_equal map1 map2 =
+  AEMap.equal (fun set1 set2 -> AESet.equal set1 set2) map1 map2
+
+let lvmap_equal map1 map2 =
+  LVMap.equal (fun set1 set2 -> LVSet.equal set1 set2) map1 map2
+
+let rec construct_basic_blocks ir_instructions = 
+  let rec create_block current_block instructions = 
+    match instructions with
+    | [] -> current_block, []
+    | instruction :: remaining_instructions ->
+      (match instruction with
+      | Goto _ | GotoIf _ | GotoIfNot _ | Ret _ ->
+        let new_block = current_block @ [instruction] in
+        new_block, remaining_instructions
+      | Label _ -> 
+        if current_block <> [] then current_block, instructions
+        else 
+          let new_block = current_block @ [instruction] in
+          create_block new_block remaining_instructions
+      | _ ->
+        let new_block = current_block @ [instruction] in
+        create_block new_block remaining_instructions
+      )
+  in
+  match ir_instructions with
   | [] -> []
-  | cur_block ->
-    let (cur, next) = make_block [] cur_block in
-    cur :: const_blocks next
+  | remaining_instructions ->
+    let (current, next) = create_block [] remaining_instructions in
+    current :: construct_basic_blocks next
 
-
-
-let head_instr block = 
+let first_instruction_of_block block = 
   match block with
-  | x :: _ -> x
+  | [] -> raise Error
+  | instruction :: _ -> instruction
 
-let rec last_instr block = 
-  match block with
-  | [last] -> last
-  | head :: tail -> last_instr tail
+let rec find_label_in_blocks blocks target_label =
+  match blocks with
+  | [] -> raise Error
+  | current_block :: remaining_blocks -> 
+    if List.mem (Label target_label) current_block then (Label target_label, current_block) 
+    else find_label_in_blocks remaining_blocks target_label
 
+let rec construct_cfg_sub basic_blocks current_block current_instrs next_block cfg = 
+  match current_instrs with
+  | [] -> cfg
+  | [instr] ->
+    (match instr with
+    | GotoIf (cond, label) | GotoIfNot (cond, label) -> 
+      let label_instr, target_block = find_label_in_blocks basic_blocks label in
+      add_edge cfg (instr, current_block) (label_instr, target_block);
+      if next_block <> [] then add_edge cfg (instr, current_block) ((first_instruction_of_block next_block), next_block);
+      cfg
+    | Goto label ->
+      let label_instr, target_block = find_label_in_blocks basic_blocks label in
+      add_edge cfg (instr, current_block) (label_instr, target_block);
+      cfg
+    | _ -> 
+      if next_block <> [] then add_edge cfg (instr, current_block) ((first_instruction_of_block next_block), next_block);
+      cfg
+    )
+  | instr :: [next_instr] ->
+    (match instr with
+    | GotoIf (cond, label) | GotoIfNot (cond, label) -> 
+      let label_instr, target_block = find_label_in_blocks basic_blocks label in
+      add_edge cfg (instr, current_block) (label_instr, target_block);
+      add_edge cfg (instr, current_block) (next_instr, current_block);
+      construct_cfg_sub basic_blocks current_block [next_instr] next_block cfg
+    | Goto label ->
+      let label_instr, target_block = find_label_in_blocks basic_blocks label in
+      add_edge cfg (instr, current_block) (label_instr, target_block);
+      construct_cfg_sub basic_blocks current_block [next_instr] next_block cfg
+    | Ret _ -> 
+      construct_cfg_sub basic_blocks current_block [next_instr] next_block cfg
+    | _ -> 
+      add_edge cfg (instr, current_block) (next_instr, current_block);
+      construct_cfg_sub basic_blocks current_block [next_instr] next_block cfg
+    )
+  | instr :: next_instr :: rest_instrs ->
+    (match instr with
+    | GotoIf (cond, label) | GotoIfNot (cond, label) -> 
+      let label_instr, target_block = find_label_in_blocks basic_blocks label in
+      add_edge cfg (instr, current_block) (label_instr, target_block);
+      add_edge cfg (instr, current_block) (next_instr, current_block);
+      construct_cfg_sub basic_blocks current_block (next_instr :: rest_instrs) next_block cfg
+    | Goto label ->
+      let label_instr, target_block = find_label_in_blocks basic_blocks label in
+      add_edge cfg (instr, current_block) (label_instr, target_block);
+      construct_cfg_sub basic_blocks current_block (next_instr :: rest_instrs) next_block cfg
+    | Ret _ -> 
+      construct_cfg_sub basic_blocks current_block (next_instr :: rest_instrs) next_block cfg
+    | _ -> 
+      add_edge cfg (instr, current_block) (next_instr, current_block);
+      construct_cfg_sub basic_blocks current_block (next_instr :: rest_instrs) next_block cfg
+    )
 
+let rec construct_cfg basic_blocks current_blocks cfg = 
+  match current_blocks with
+  | [] -> cfg
+  | [current_block] ->
+    construct_cfg_sub basic_blocks current_block current_block [] cfg
+  | current_block :: [next_block] ->
+    construct_cfg basic_blocks [next_block] (construct_cfg_sub basic_blocks current_block current_block next_block cfg)
+  | current_block :: next_block :: rest_blocks ->
+    construct_cfg basic_blocks (next_block :: rest_blocks) (construct_cfg_sub basic_blocks current_block current_block next_block cfg)
 
-let rec find_label basic_blocks label =
+(* 'initialize_rd_set_for_block' 함수는 블록 내의 각 명령어에 대해 RDSet을 초기화한다 *)
+let rec initialize_rd_set_for_block block instructions rd_set = 
+  match instructions with
+  | [] -> rd_set
+  | instr :: remaining_instrs ->
+    let new_rd_set = RDMap.add (instr, block) RDSet.empty rd_set in
+    initialize_rd_set_for_block block remaining_instrs new_rd_set
+
+(* 'initialize_rd_set' 함수는 모든 기본 블록에 대해 RDSet을 초기화한다 *)
+let rec initialize_rd_set basic_blocks rd_set = 
   match basic_blocks with
-  | head :: tail -> 
-    if List.mem (Label label) head then (Label label, head) else find_label tail label
+  | [] -> rd_set
+  | block :: remaining_blocks ->
+    let rd_set = initialize_rd_set_for_block block block rd_set in
+    initialize_rd_set remaining_blocks rd_set
 
-let rec const_CFGsub basic_blocks block cur_block next_block cfg = 
-  match cur_block with
-  | [] -> cfg
-  | [head] ->
-    (match head with
-    | GotoIf (r, label) | GotoIfNot (r, label) -> 
-      let label_ir, label_block = find_label basic_blocks label in
-      add_edge cfg (head, block) (label_ir, label_block);
-      if next_block <> [] then add_edge cfg (head, block) ((head_instr next_block), next_block);
-      cfg
-    | Goto label ->
-      let label_ir, label_block = find_label basic_blocks label in
-      add_edge cfg (head, block) (label_ir, label_block);
-      cfg
-    | _ -> 
-      if next_block <> [] then add_edge cfg (head, block) ((head_instr next_block), next_block);
-      cfg
-    )
-  | head :: [next] ->
-    (match head with
-    | GotoIf (r, label) | GotoIfNot (r, label) -> 
-      let label_ir, label_block = find_label basic_blocks label in
-      add_edge cfg (head, block) (label_ir, label_block);
-      add_edge cfg (head, block) (next, block);
-      const_CFGsub basic_blocks block [next] next_block cfg
-    | Goto label ->
-      let label_ir, label_block = find_label basic_blocks label in
-      add_edge cfg (head, block) (label_ir, label_block);
-      const_CFGsub basic_blocks block [next] next_block cfg
-    | Ret o -> 
-      const_CFGsub basic_blocks block [next] next_block cfg
-    | _ -> 
-      add_edge cfg (head, block) (next, block);
-      const_CFGsub basic_blocks block [next] next_block cfg
-    )
-  | head :: next :: tail ->
-    (match head with
-    | GotoIf (r, label) | GotoIfNot (r, label) -> 
-      let label_ir, label_block = find_label basic_blocks label in
-      add_edge cfg (head, block) (label_ir, label_block);
-      add_edge cfg (head, block) (next, block);
-      const_CFGsub basic_blocks block (next :: tail) next_block cfg
-    | Goto label ->
-      let label_ir, label_block = find_label basic_blocks label in
-      add_edge cfg (head, block) (label_ir, label_block);
-      const_CFGsub basic_blocks block (next :: tail) next_block cfg
-    | Ret o -> 
-      const_CFGsub basic_blocks block (next :: tail) next_block cfg
-    | _ -> 
-      add_edge cfg (head, block) (next, block);
-      const_CFGsub basic_blocks block (next :: tail) next_block cfg
-    )
-
-let rec const_CFG basic_blocks cur_blocks cfg = 
-  match cur_blocks with
-  | [] -> cfg
-  | [head] ->
-    const_CFGsub basic_blocks head head [] cfg
-  | head :: [next] ->
-    const_CFG basic_blocks [next] (const_CFGsub basic_blocks head head next cfg)
-  | head :: next :: tail ->
-    const_CFG basic_blocks (next::tail) (const_CFGsub basic_blocks head head next cfg)
-
-    
-let find_r_in_rd_set inst r set =
-  RDSet.fold (fun rdef ret_set -> 
+(* 'find_reg_in_rd_set' 함수는 RDSet에서 특정 레지스터와 일치하는 정의를 찾는다 *)
+let find_reg_in_rd_set instruction reg set =
+  RDSet.fold (fun rdef result_set -> 
     match rdef with
     | Set (r1, _) | Copy (_, r1) | BinOp (r1, _, _, _) | UnOp (r1, _, _) -> 
-      if r1 = r then RDSet.add rdef ret_set else ret_set
+      if r1 = reg then RDSet.add rdef result_set else result_set
     | _ -> 
-      ret_set
+      result_set
   ) set RDSet.empty
 
-let rec transfer cur_ir cur_rd =  (* 한 instr에서 RDSet을 계산한다 *)
-  match cur_ir with
-  | Set (r, _) | Copy (_, r) | BinOp (r, _, _, _) | UnOp (r, _, _) ->
-    let contain_r = find_r_in_rd_set cur_ir r cur_rd in
-    let new_cur_rd = RDSet.diff cur_rd contain_r in
-    let new_cur_rd = RDSet.add cur_ir new_cur_rd in
-    new_cur_rd
-  | _ -> cur_rd
+(* 'update_rd_set' 함수는 현재 명령어에서 RDSet을 갱신한다 *)
+let rec update_rd_set current_instr current_rd_set =  
+  match current_instr with
+  | Set (reg, _) | Copy (_, reg) | BinOp (reg, _, _, _) | UnOp (reg, _, _) ->
+    let reg_defs = find_reg_in_rd_set current_instr reg current_rd_set in
+    let new_rd_set = RDSet.diff current_rd_set reg_defs in
+    let new_rd_set = RDSet.add current_instr new_rd_set in
+    new_rd_set
+  | _ -> current_rd_set
   
-
-let get_pred_RDSet cfg block cur_instr rd_in rd_set = 
+(* 'get_rd_set_of_predecessor' 함수는 주어진 명령어의 선행 블록들의 RDSet을 가져온다 *)
+let get_rd_set_of_predecessor cfg block current_instr rd_in rd_set = 
   Hashtbl.fold (fun key value acc ->
-    if List.mem (cur_instr, block) value then
+    if List.mem (current_instr, block) value then
       try
         let pred_rd = RDMap.find key rd_set in
         RDSet.union acc pred_rd
@@ -166,22 +207,21 @@ let get_pred_RDSet cfg block cur_instr rd_in rd_set =
       acc
   ) cfg rd_in
   
-let rdmap_equal map1 map2 =
-  RDMap.equal (fun set1 set2 -> RDSet.equal set1 set2) map1 map2
-
-let rec compute_RDSetSub cfg block cur_block rd_set = 
-  match cur_block with
+(* 'compute_rd_set_for_block' 함수는 블록 내의 각 명령어에 대해 RDSet을 계산한다 *)
+let rec compute_rd_set_for_block cfg block instructions rd_set = 
+  match instructions with
   | [] -> rd_set
-  | head :: tail ->
-    let rd_in = get_pred_RDSet cfg block head RDSet.empty rd_set in
-    let new_rd_set = RDMap.add (head, block) (transfer head rd_in) rd_set in 
-    compute_RDSetSub cfg block tail new_rd_set
+  | instr :: remaining_instrs ->
+    let rd_in = get_rd_set_of_predecessor cfg block instr RDSet.empty rd_set in
+    let new_rd_set = RDMap.add (instr, block) (update_rd_set instr rd_in) rd_set in 
+    compute_rd_set_for_block cfg block remaining_instrs new_rd_set
 
-let rec compute_RDSet cfg basic_blocks rd_set =
+(* 'compute_RDSet' 함수는 모든 기본 블록에 대해 RDSet이 변하지 않을 때까지반복적으로 계산한다 *)
+let rec compute_rd_set cfg basic_blocks initial_rd_set =
   let rec iterate previous_rd_set =
     let new_rd_set =
       List.fold_left (fun acc_rd_set block ->
-        compute_RDSetSub cfg block block acc_rd_set
+        compute_rd_set_for_block cfg block block acc_rd_set
       ) previous_rd_set basic_blocks
     in
     if rdmap_equal new_rd_set previous_rd_set then
@@ -189,22 +229,11 @@ let rec compute_RDSet cfg basic_blocks rd_set =
     else
       iterate new_rd_set
   in
-  iterate rd_set
+  iterate initial_rd_set
 
-let rec initial_RDSub block cur_block rd_set = 
-  match cur_block with
-  | [] -> rd_set
-  | head :: tail ->
-    let new_rd_set = RDMap.add (head, block) RDSet.empty rd_set in
-  initial_RDSub block tail new_rd_set
 
-let rec initial_RDSet basic_blocks rd_set = 
-  match basic_blocks with
-  | [] -> rd_set
-  | head :: tail ->
-    initial_RDSet tail (initial_RDSub head head rd_set)
-
-let rec find_RD block reg rd_set = 
+(* 'find_reaching_definition' 함수는 레지스터의 RDSet 내의 정의를 찾는다 *)
+let rec find_reaching_definition block reg rd_set = 
   let flag, value = RDSet.fold (fun x (flag, value) -> 
     match x with
     | Set (r, i) ->
@@ -215,106 +244,220 @@ let rec find_RD block reg rd_set =
   ) rd_set (false, ImmInt 0) in
   let flag, value = RDSet.fold (fun x (flag, value) -> 
     match x with
-    | Copy (_, r) | BinOp (r, _, _, _) | UnOp (r, _, _) -> if r = reg then (false, value) else (flag, value)
+    | Set (r, i) ->
+      if r = reg && i <> value then (false, i) else (flag, value)
+    | Copy (_, r) | BinOp (r, _, _, _) | UnOp (r, _, _) -> 
+      if r = reg then (false, value) else (flag, value)
     | _ -> (flag, value)
   ) rd_set (flag, value) in
   flag, value
 
-
-let rec optimize_block cfg block cur_block rd_set =
-  match cur_block with
+(* 'optimize_instructions_with_rd' 함수는 블록 내의 각 명령어를 RDSet을 이용하여 최적화한다 *)
+let rec optimize_instructions_with_rd cfg block instructions rd_set =
+  match instructions with
   | [] -> []
-  | head :: tail -> 
-    match head with
-      | Copy (r, r2) ->
-        let rd_block = get_pred_RDSet cfg block head RDSet.empty rd_set in (* head의 rd를 찾음 *)
-        let flag, value = find_RD block r rd_block in
-        if flag = true then [Set (r2, value)] @ optimize_block cfg block tail rd_set
-        else head :: optimize_block cfg block tail rd_set
+  | instr :: remaining_instrs -> 
+    let rd_instr = get_rd_set_of_predecessor cfg block instr RDSet.empty rd_set in
+    (match instr with
+    | Copy (dest_reg, src_reg) ->
+      let flag, value = find_reaching_definition block dest_reg rd_instr in
+      if flag = true then 
+        Set (src_reg, value) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+      else 
+        instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
 
-      | BinOp (r1, r2, r3, r4) ->
-        (match r3 with
-        | Reg ra ->
-          let rd_block = get_pred_RDSet cfg block head RDSet.empty rd_set in
-          let flag, value = find_RD block ra rd_block in
-          if flag = true then [BinOp (r1, r2, Imm value, r4)] @ optimize_block cfg block tail rd_set
-          else (match r4 with
-          | Reg rb ->
-            let rd_block = get_pred_RDSet cfg block head RDSet.empty rd_set in
-            let flag, value = find_RD block rb rd_block in
-            if flag = true then [BinOp (r1, r2, r3, Imm value)] @ optimize_block cfg block tail rd_set
-            else head :: optimize_block cfg block tail rd_set
-          | _ -> head :: optimize_block cfg block tail rd_set)
-        | _ -> 
-          match r4 with
-          | Reg rb ->
-            let rd_block = get_pred_RDSet cfg block head RDSet.empty rd_set in
-            let flag, value = find_RD block rb rd_block in
-            if flag = true then [BinOp (r1, r2, r3, Imm value)] @ optimize_block cfg block tail rd_set
-            else head :: optimize_block cfg block tail rd_set
-          | _ -> head :: optimize_block cfg block tail rd_set)
+    | BinOp (dest_reg, op, operand1, operand2) ->
+      (match operand1 with
+      | Reg reg1 ->
+        let flag, value = find_reaching_definition block reg1 rd_instr in
+        if flag = true then 
+          BinOp (dest_reg, op, Imm value, operand2) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+        else 
+          (match operand2 with
+          | Reg reg2 ->
+            let flag, value = find_reaching_definition block reg2 rd_instr in
+            if flag = true then 
+              BinOp (dest_reg, op, operand1, Imm value) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+            else 
+              instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+          | _ -> instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set)
+      | _ -> 
+        (match operand2 with
+        | Reg reg2 ->
+          let flag, value = find_reaching_definition block reg2 rd_instr in
+          if flag = true then 
+            BinOp (dest_reg, op, operand1, Imm value) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+          else 
+            instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+        | _ -> instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set))
 
-      | UnOp (r1, r2, Reg r) ->
-        let rd_block = get_pred_RDSet cfg block head RDSet.empty rd_set in
-        let flag, value = find_RD block r rd_block in
-        if flag = true then [UnOp (r1, r2, Imm value)] @ optimize_block cfg block tail rd_set
-        else head :: optimize_block cfg block tail rd_set
+    | UnOp (dest_reg, op, Reg reg) ->
+      let flag, value = find_reaching_definition block reg rd_instr in
+      if flag = true then 
+        UnOp (dest_reg, op, Imm value) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+      else 
+        instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
 
-      | _ -> head :: optimize_block cfg block tail rd_set
+    | Store (Reg dest_reg, src_reg) ->
+      let flag, value = find_reaching_definition block dest_reg rd_instr in
+      if flag = true then 
+        Store (Imm value, src_reg) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+      else 
+        instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
 
-let rec optimize_RD cfg basic_blocks rd_set = 
+    | Ret (Reg reg) ->
+      let flag, value = find_reaching_definition block reg rd_instr in
+      if flag = true then 
+        Ret (Imm value) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+      else 
+        instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+    
+    | GotoIf (reg, l) ->
+      let flag, value = find_reaching_definition block reg rd_instr in
+      if flag = true then 
+        if value = ImmBool false then 
+          optimize_instructions_with_rd cfg block remaining_instrs rd_set
+        else Goto (l) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+      else instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+
+    | GotoIfNot (reg, l) ->
+      let flag, value = find_reaching_definition block reg rd_instr in
+      if flag = true then 
+        if value = ImmBool true then 
+          optimize_instructions_with_rd cfg block remaining_instrs rd_set
+        else Goto (l) :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+      else instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set
+
+    | _ -> instr :: optimize_instructions_with_rd cfg block remaining_instrs rd_set)
+
+(* 'optimize_blocks_with_rd' 함수는 모든 기본 블록에 대해 RDSet을 이용하여 최적화된 명령어를 반환한다 *)
+let rec optimize_blocks_with_rd cfg basic_blocks rd_set = 
   match basic_blocks with
   | [] -> []
-  | head :: tail ->
-    optimize_block cfg head head rd_set @ optimize_RD cfg tail rd_set
+  | block :: remaining_blocks ->
+    let optimized_block = optimize_instructions_with_rd cfg block block rd_set in
+    optimized_block @ optimize_blocks_with_rd cfg remaining_blocks rd_set
+
 
 let rec constant_folding ir_list =
+  let fold_constants r op i1 i2 tail =
+    match (i1, i2) with
+    | (Ir.ImmInt v1, Ir.ImmInt v2) ->
+      let result = match op with
+        | AddOp -> Ir.ImmInt (v1 + v2)
+        | SubOp -> Ir.ImmInt (v1 - v2)
+        | MulOp -> Ir.ImmInt (v1 * v2)
+        | DivOp -> Ir.ImmInt (v1 / v2)
+        | GtOp -> Ir.ImmBool (v1 > v2)
+        | GeqOp -> Ir.ImmBool (v1 >= v2)
+        | LtOp -> Ir.ImmBool (v1 < v2)
+        | LeqOp -> Ir.ImmBool (v1 <= v2)
+        | EqOp -> Ir.ImmBool (v1 = v2)
+        | NeqOp -> Ir.ImmBool (v1 <> v2)
+        | _ -> raise Error
+      in
+      [Set (r, result)] @ constant_folding tail
+    | (Ir.ImmBool v1, Ir.ImmBool v2) ->
+      let result = match op with
+        | EqOp -> Ir.ImmBool (v1 = v2)
+        | NeqOp -> Ir.ImmBool (v1 <> v2)
+        | _ -> raise Error
+      in
+      [Set (r, result)] @ constant_folding tail
+    | _ -> BinOp (r, op, Imm i1, Imm i2) :: constant_folding tail
+  in
   match ir_list with
   | [] -> []
   | head :: tail ->
     (match head with
-    | BinOp (r, op, r1, r2) ->
-      (match (op, r1, r2) with
-      | (AddOp, Imm i1, Imm i2) -> 
-        let i1_int = match i1 with Ir.ImmInt v1 -> v1 in
-        let i2_int = match i2 with Ir.ImmInt v2 -> v2 in
-        [Set (r, ImmInt (i1_int + i2_int))] @ constant_folding tail
-      | (SubOp, Imm i1, Imm i2) -> 
-        let i1_int = match i1 with Ir.ImmInt v1 -> v1 in
-        let i2_int = match i2 with Ir.ImmInt v2 -> v2 in
-        [Set (r, ImmInt (i1_int - i2_int))] @ constant_folding tail
-      | (MulOp, Imm i1, Imm i2) -> 
-        let i1_int = match i1 with Ir.ImmInt v1 -> v1 in
-        let i2_int = match i2 with Ir.ImmInt v2 -> v2 in
-        [Set (r, ImmInt (i1_int * i2_int))] @ constant_folding tail
-      | (DivOp, Imm i1, Imm i2) -> 
-        let i1_int = match i1 with Ir.ImmInt v1 -> v1 in
-        let i2_int = match i2 with Ir.ImmInt v2 -> v2 in
-        [Set (r, ImmInt (i1_int / i2_int))] @ constant_folding tail
-
-      | (GtOp, Imm i1, Imm i2) -> 
-        let i1_int = match i1 with Ir.ImmInt v1 -> v1 in
-        let i2_int = match i2 with Ir.ImmInt v2 -> v2 in
-        [Set (r, ImmBool (i1_int > i2_int))] @ constant_folding tail
-      | (GeqOp, Imm i1, Imm i2) -> 
-        let i1_int = match i1 with Ir.ImmInt v1 -> v1 in
-        let i2_int = match i2 with Ir.ImmInt v2 -> v2 in
-        [Set (r, ImmBool (i1_int >= i2_int))] @ constant_folding tail
-      | (LtOp, Imm i1, Imm i2) -> 
-        let i1_int = match i1 with Ir.ImmInt v1 -> v1 in
-        let i2_int = match i2 with Ir.ImmInt v2 -> v2 in
-        [Set (r, ImmBool (i1_int < i2_int))] @ constant_folding tail
-      | (LeqOp, Imm i1, Imm i2) -> 
-        let i1_int = match i1 with Ir.ImmInt v1 -> v1 in
-        let i2_int = match i2 with Ir.ImmInt v2 -> v2 in
-        [Set (r, ImmBool (i1_int <= i2_int))] @ constant_folding tail
-
-      | (EqOp, Imm i1, Imm i2) -> 
-        [Set (r, ImmBool (i1 = i2))] @ constant_folding tail
-      | (NeqOp, Imm i1, Imm i2) -> 
-        [Set (r, ImmBool (i1 <> i2))] @ constant_folding tail
-      | _ -> head :: constant_folding tail)
+    | BinOp (r, op, Imm i1, Imm i2) -> fold_constants r op i1 i2 tail
+    | UnOp (r, NegOp, Imm i1) ->
+      (match i1 with
+      | Ir.ImmInt v1 -> Set (r, Ir.ImmInt (-v1)) :: constant_folding tail
+      | _ -> raise Error)
     | _ -> head :: constant_folding tail)
+
+
+
+(* 'initialize_ae_set_for_block' 함수는 블록 내의 각 명령어에 대해 AESet을 초기화한다 *)
+let rec initialize_ae_set_for_block block instructions rd_set = 
+  match instructions with
+  | [] -> rd_set
+  | instr :: remaining_instrs ->
+    let new_rd_set = AEMap.add (instr, block) AESet.empty rd_set in
+    initialize_ae_set_for_block block remaining_instrs new_rd_set
+
+(* 'initialize_ae_set' 함수는 모든 기본 블록에 대해 AESet을 초기화한다 *)
+let rec initialize_ae_set basic_blocks rd_set = 
+  match basic_blocks with
+  | [] -> rd_set
+  | block :: remaining_blocks ->
+    let rd_set = initialize_ae_set_for_block block block rd_set in
+    initialize_ae_set remaining_blocks rd_set
+
+let string_contains main_str sub_str =
+  let len_main = String.length main_str in
+  let len_sub = String.length sub_str in
+  let rec aux i =
+    if i > len_main - len_sub then false
+    else if String.sub main_str i len_sub = sub_str then true
+    else aux (i + 1)
+  in
+  aux 0
+
+
+let find_r_in_ae_set inst r1 set =
+  AESet.fold (fun rdef ret_set -> 
+    if string_contains (instr_to_str rdef) r1 = true then AESet.add rdef ret_set else ret_set
+  ) set AESet.empty
+
+
+
+let rec transfer_AE cur_ir cur_rd =  (* 한 instr에서 AESet을 계산한다 *)
+  match cur_ir with
+  | Set (r, _) ->
+    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
+    let new_cur_rd = AESet.diff cur_rd contain_r in
+    let new_cur_rd = AESet.add cur_ir new_cur_rd in 
+    new_cur_rd
+    
+  | Copy (r1, r) | Load (r1, r) ->
+    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
+    let new_cur_rd = AESet.diff cur_rd contain_r in
+    if r = r1 then new_cur_rd 
+    else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+
+  | BinOp (r, _, r2, r3) ->
+    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
+    let new_cur_rd = AESet.diff cur_rd contain_r in
+    (match (r2, r3) with
+    | (Reg ra, Reg rb) -> 
+      if r = ra || r = rb then new_cur_rd 
+      else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+    | (Reg ra, _) ->
+      if r = ra then new_cur_rd 
+      else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+    | (_, Reg rb) ->
+      if r = rb then new_cur_rd 
+      else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+    | (_, _) -> let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd)
+
+  | UnOp (r, _, r1) ->
+    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
+    let new_cur_rd = AESet.diff cur_rd contain_r in
+    (match r1 with
+    | Reg ra ->  
+      if r = ra then new_cur_rd 
+      else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+    | _ -> let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd)
+
+  | Store (Reg r, r1)  ->
+    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
+    let new_cur_rd = AESet.diff cur_rd contain_r in
+    if r = r1 then new_cur_rd 
+    else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+
+  | _ -> cur_rd
 
 
 let get_pred_AESet cfg block cur_instr rd_in rd_set = 
@@ -323,83 +466,301 @@ let get_pred_AESet cfg block cur_instr rd_in rd_set =
     if List.mem (cur_instr, block) value then (
       count := !count + 1;
       try
-        let pred_rd = RDMap.find key rd_set in
-        RDSet.inter acc pred_rd
+        let pred_rd = AEMap.find key rd_set in
+        AESet.inter acc pred_rd
       with Not_found ->
         acc
     ) else 
       acc
   ) cfg rd_in
   in
-  if !count = 0 then RDSet.empty else ret
+  if !count = 0 then AESet.empty else ret
 
 
-let string_contains instr_to_str inst_str =
-  let len_instr_to_str = String.length instr_to_str in
-  let len_inst_str = String.length inst_str in
-  let rec aux i =
-    if i > len_instr_to_str - len_inst_str then false
-    else if String.sub instr_to_str i len_inst_str = inst_str then true
-    else aux (i + 1)
+let rec compute_AESetSub cfg block cur_block rd_all rd_set = 
+  match cur_block with
+  | [] -> rd_set
+  | head :: tail ->
+    let rd_in = get_pred_AESet cfg block head rd_all rd_set in
+    let new_rd_set = AEMap.add (head, block) (transfer_AE head rd_in) rd_set in 
+    compute_AESetSub cfg block tail rd_all new_rd_set
+
+let rec compute_AESet cfg basic_blocks rd_all rd_set =
+  let rec iterate previous_rd_set =
+    let new_rd_set =
+      List.fold_left (fun acc_rd_set block ->
+        compute_AESetSub cfg block block rd_all acc_rd_set
+      ) previous_rd_set basic_blocks
+    in
+    if aemap_equal new_rd_set previous_rd_set then
+      new_rd_set
+    else
+      iterate new_rd_set
   in
-  aux 0
-
-
-let find_r_in_ae_set inst r1 set =
-  RDSet.fold (fun rdef ret_set -> 
-    if string_contains (instr_to_str rdef) r1 = true then RDSet.add rdef ret_set else ret_set
-  ) set RDSet.empty
+  iterate rd_set
 
 
 
-let rec transfer_AE cur_ir cur_rd =  (* 한 instr에서 RDSet을 계산한다 *)
-  match cur_ir with
-  | Set (r, _) ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = RDSet.diff cur_rd contain_r in
-    let new_cur_rd = RDSet.add cur_ir new_cur_rd in 
-    new_cur_rd
-    
-  | Copy (r1, r) | Load (r1, r) ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = RDSet.diff cur_rd contain_r in
-    if r = r1 then new_cur_rd 
-    else let new_cur_rd = RDSet.add cur_ir new_cur_rd in new_cur_rd
-
-  | BinOp (r, _, r2, r3) ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = RDSet.diff cur_rd contain_r in
-    (match (r2, r3) with
-    | (Reg ra, Reg rb) -> 
-      if r = ra || r = rb then new_cur_rd 
-      else let new_cur_rd = RDSet.add cur_ir new_cur_rd in new_cur_rd
-    | (Reg ra, _) ->
-      if r = ra then new_cur_rd 
-      else let new_cur_rd = RDSet.add cur_ir new_cur_rd in new_cur_rd
-    | (_, Reg rb) ->
-      if r = rb then new_cur_rd 
-      else let new_cur_rd = RDSet.add cur_ir new_cur_rd in new_cur_rd
-    | (_, _) -> let new_cur_rd = RDSet.add cur_ir new_cur_rd in new_cur_rd)
-
-  | UnOp (r, _, r1) ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = RDSet.diff cur_rd contain_r in
-    (match r1 with
-    | Reg ra ->  
-      if r = ra then new_cur_rd 
-      else let new_cur_rd = RDSet.add cur_ir new_cur_rd in new_cur_rd
-    | _ -> let new_cur_rd = RDSet.add cur_ir new_cur_rd in new_cur_rd)
-
-  | Store (Reg r, r1)  ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = RDSet.diff cur_rd contain_r in
-    if r = r1 then new_cur_rd 
-    else let new_cur_rd = RDSet.add cur_ir new_cur_rd in new_cur_rd
-
-  | _ -> cur_rd
-
-
+let rec find_AE block ir_inst hh rd_set = 
+  let (r1, r2, r3, r4) = ir_inst in
+  let left_str = oprnd_to_str r3 in
+  let binop_str = binop_to_str r2 in
+  let right_str = oprnd_to_str r4 in
+  let inst_str = sprintf "%s %s %s" left_str binop_str right_str in
+  let flag, value = AESet.fold (fun x (flag, value) -> 
+    if (string_contains (instr_to_str x) r1 = false) && (string_contains (instr_to_str x) inst_str) = true then (true, x)
+    else if (string_contains (instr_to_str x) r1 = true) && (string_contains (instr_to_str x) inst_str) = true then (false, value)
+    else (flag, value)
+  ) rd_set (false, hh) in
+  flag, value
   
+let rec optimize_block_ae cfg block cur_block ae_all rd_set =
+  match cur_block with
+  | [] -> []
+  | head :: tail -> 
+    match head with
+    | BinOp (r1, r2, r3, r4) -> 
+      let rd_block = get_pred_AESet cfg block head ae_all rd_set in
+      let flag, value = find_AE block (r1, r2, r3, r4) head rd_block in
+      if flag = true then 
+        match value with
+        | BinOp (rr, _, _, _) ->
+          [Copy (rr, r1)] @ optimize_block_ae cfg block tail ae_all rd_set
+        | _ -> head :: optimize_block_ae cfg block tail ae_all rd_set
+      else head :: optimize_block_ae cfg block tail ae_all rd_set
+    | _ -> head :: optimize_block_ae cfg block tail ae_all rd_set
+
+let rec optimize_AE cfg basic_blocks ae_all rd_set = 
+  match basic_blocks with
+  | [] -> []
+  | head :: tail ->
+    optimize_block_ae cfg head head ae_all rd_set @ optimize_AE cfg tail ae_all rd_set
+  
+let rec all_ae_set ae_set ir_list = 
+  match ir_list with
+  | [] -> ae_set
+  | head :: tail ->
+    all_ae_set (AESet.add head ae_set) tail
+    
+
+(* 'initialize_lv_set_for_block' 함수는 블록 내의 각 명령어에 대해 LVSet을 초기화한다 *)
+let rec initialize_lv_set_for_block block instructions lv_set = 
+  match instructions with
+  | [] -> lv_set
+  | instr :: remaining_instrs ->
+    let new_lv_set = LVMap.add (instr, block) LVSet.empty lv_set in
+    initialize_lv_set_for_block block remaining_instrs new_lv_set
+
+(* 'initialize_lv_set' 함수는 모든 기본 블록에 대해 LVSet을 초기화한다 *)
+let rec initialize_lv_set basic_blocks lv_set = 
+  match basic_blocks with
+  | [] -> lv_set
+  | block :: remaining_blocks ->
+    let lv_set = initialize_lv_set_for_block block block lv_set in
+    initialize_lv_set remaining_blocks lv_set
+
+
+let rec lvset succ lv_in lv_set = 
+  match succ with
+  | [] -> lv_in
+  | head :: tail ->
+    let inst, _ = head in
+    let pred_lv = LVMap.find head lv_set in
+    let lv_in = LVSet.union lv_in pred_lv in
+    lvset tail lv_in lv_set
+
+(* 'get_lv_set_of_predecessor' 함수는 주어진 명령어의 후행 블록들의 LVSet을 가져온다 *)
+let get_lv_set_of_successor cfg block current_instr lv_in lv_set = 
+  let successors = 
+    try Hashtbl.find cfg (current_instr, block)
+    with Not_found -> []
+  in
+  lvset successors lv_in lv_set
+
+
+(* 'update_rd_set' 함수는 현재 명령어에서 RDSet을 갱신한다 *)
+let rec update_lv_set current_instr current_lv_set =  
+  match current_instr with
+  | Set (r1, _ ) ->
+    let new_lv_set = LVSet.remove r1 current_lv_set in
+    new_lv_set
+
+  | Copy (r2, r1) | Load (r1, r2) ->
+    let new_lv_set = LVSet.remove r1 current_lv_set in
+    let new_lv_set = LVSet.add r2 new_lv_set in
+    new_lv_set
+
+  | Store (r2, r1) ->
+    let new_lv_set = LVSet.add r1 current_lv_set in
+    (match r2 with
+    | Reg ra -> 
+      let new_lv_set = LVSet.add ra new_lv_set in
+      new_lv_set
+    | _ -> new_lv_set)
+
+  | UnOp (r1, _, Reg r2)->
+    let new_lv_set = LVSet.remove r1 current_lv_set in
+    let new_lv_set = LVSet.add r2 new_lv_set in
+    new_lv_set
+
+  | BinOp (r1, _, r2, r3)  ->
+    let new_lv_set = LVSet.remove r1 current_lv_set in
+    (match r2 with
+    | Reg ra ->
+      let new_lv_set = LVSet.add ra new_lv_set in
+      (match r3 with
+      | Reg rb -> let new_lv_set = LVSet.add rb new_lv_set in new_lv_set
+      | _ -> new_lv_set)
+    | _ -> 
+      (match r3 with
+      | Reg rb -> let new_lv_set = LVSet.add rb new_lv_set in new_lv_set
+      | _ -> new_lv_set)
+    )
+  | Ret (Reg r) -> 
+    let new_lv_set = LVSet.add r current_lv_set in
+    new_lv_set
+  | GotoIf (r, _) | GotoIfNot (r, _) ->
+    let new_lv_set = LVSet.add r current_lv_set in
+    new_lv_set
+  | _ -> current_lv_set
+
+(* 'compute_lv_set_for_block' 함수는 블록 내의 각 명령어에 대해 LVSet을 계산한다 *)
+let rec compute_lv_set_for_block cfg block instructions lv_set = 
+  match instructions with
+  | [] -> lv_set
+  | instr :: remaining_instrs ->
+    let lv_in = get_lv_set_of_successor cfg block instr LVSet.empty lv_set in
+    let new_lv_set = LVMap.add (instr, block) (update_lv_set instr lv_in) lv_set in 
+    compute_lv_set_for_block cfg block remaining_instrs new_lv_set
+
+
+(* 'compute_lv_set' 함수는 모든 기본 블록에 대해 LVSet이 변하지 않을 때 까지 반복적으로 계산한다 *)
+let rec compute_lv_set cfg basic_blocks initial_lv_set =
+  let rec iterate previous_lv_set =
+    let new_lv_set =
+      List.fold_right (fun block acc_lv_set ->
+        compute_lv_set_for_block cfg block (List.rev block) acc_lv_set
+      ) basic_blocks previous_lv_set 
+    in
+    if lvmap_equal new_lv_set previous_lv_set then
+      new_lv_set
+    else
+      iterate new_lv_set
+  in
+  iterate initial_lv_set
+
+
+
+
+(* 'get_lv_set_of_predecessor' 함수는 주어진 명령어의 선행 블록들의 lVSet을 가져온다 *)
+let get_lv_set_of_predecessor cfg block current_instr lv_in lv_set = 
+  Hashtbl.fold (fun key value acc ->
+    if List.mem (current_instr, block) value then
+      try
+        let pred_lv = LVMap.find key lv_set in
+        LVSet.union acc pred_lv
+      with Not_found ->
+        acc
+    else 
+      acc
+  ) cfg lv_in
+
+let find_liveness reg lv_in =
+  if LVSet.mem reg lv_in = false then true
+  else false
+
+(* 'optimize_instructions_with_rd' 함수는 블록 내의 각 명령어를 RDSet을 이용하여 최적화한다 *)
+let rec optimize_instructions_with_lv cfg block instructions lv_set =
+  match instructions with
+  | [] -> []
+  | instr :: remaining_instrs -> 
+    match instr with
+    | Set (r, _) | Copy (_, r) | BinOp (r, _, _, _) | UnOp (r, _, _)  ->
+      let lv_in = get_lv_set_of_successor cfg block instr LVSet.empty lv_set in
+      let flag = find_liveness r lv_in in
+      if flag = true then [] @ optimize_instructions_with_lv cfg block remaining_instrs lv_set
+      else [instr] @ optimize_instructions_with_lv cfg block remaining_instrs lv_set
+    | _ -> [instr] @ optimize_instructions_with_lv cfg block remaining_instrs lv_set
+
+(* 'optimize_blocks_with_rd' 함수는 모든 기본 블록에 대해 RDSet을 이용하여 최적화된 명령어를 반환한다 *)
+let rec optimize_blocks_with_lv cfg basic_blocks lv_set = 
+  match basic_blocks with
+  | [] -> []
+  | block :: remaining_blocks ->
+    let optimized_block = optimize_instructions_with_lv cfg block block lv_set in
+    optimized_block @ optimize_blocks_with_lv cfg remaining_blocks lv_set
+
+let print_rdset rdset =
+  LVSet.iter (fun instr ->
+    printf "%s, " (instr); 
+  ) rdset
+
+let print_lvmap rdmap =
+  LVMap.iter (fun key rdset ->
+    let key_instr, _ = key in
+    printf "LVSet for instr: %s \n" (instr_to_str key_instr);
+    print_string "LV: ";
+    print_rdset rdset; 
+    print_newline ()
+  ) rdmap
+
+(* 'find_reaching_definition' 함수는 레지스터의 RDSet 내의 정의를 찾는다 *)
+let rec find_reaching_definition_cp block reg rd_set = 
+  let flag, value = RDSet.fold (fun x (flag, value) -> 
+    match x with
+    | Copy (v, r) ->
+      if r = reg then (true, v) else (flag, value)
+    | Set (r, i) ->
+      if r = reg then (false, value) else (flag, value)
+    | BinOp (r, _, _, _) | UnOp (r, _, _) ->
+      if r = reg then (false, value) else (flag, value)
+    | _ -> (flag, value)
+  ) rd_set (false, "") in
+  flag, value
+
+(* 'optimize_instructions_with_rd' 함수는 블록 내의 각 명령어를 RDSet을 이용하여 최적화한다 *)
+let rec copy_propagation_instr cfg block instructions rd_set =
+  match instructions with
+  | [] -> []
+  | instr :: remaining_instrs -> 
+    let rd_instr = get_rd_set_of_predecessor cfg block instr RDSet.empty rd_set in
+    match instr with
+    | UnOp (r1, r2, Reg r) ->  
+      let flag, value = find_reaching_definition_cp block r rd_instr in
+      if flag = true then [UnOp (r1, r2, Reg value)] @ copy_propagation_instr cfg block remaining_instrs rd_set
+      else instr :: copy_propagation_instr cfg block remaining_instrs rd_set
+    | BinOp (r1, r2, r3, r4) ->
+      (match r3 with
+      | Reg ra ->
+        let flag, value = find_reaching_definition_cp block ra rd_instr in
+        if flag = true then [BinOp (r1, r2, Reg value, r4)] @ copy_propagation_instr cfg block remaining_instrs rd_set
+        else 
+          (match r4 with
+          | Reg rb -> 
+            let flag, value = find_reaching_definition_cp block rb rd_instr in
+            if flag = true then [BinOp (r1, r2, r3, Reg value)] @ copy_propagation_instr cfg block remaining_instrs rd_set
+            else instr :: copy_propagation_instr cfg block remaining_instrs rd_set
+          | _ -> instr :: copy_propagation_instr cfg block remaining_instrs rd_set)
+      | _ ->
+        (match r4 with
+          | Reg rb -> 
+            let flag, value = find_reaching_definition_cp block rb rd_instr in
+            if flag = true then [BinOp (r1, r2, r3, Reg value)] @ copy_propagation_instr cfg block remaining_instrs rd_set
+            else instr :: copy_propagation_instr cfg block remaining_instrs rd_set
+          | _ -> instr :: copy_propagation_instr cfg block remaining_instrs rd_set)
+      ) 
+    | _ -> instr :: copy_propagation_instr cfg block remaining_instrs rd_set
+
+(* 'optimize_blocks_with_rd' 함수는 모든 기본 블록에 대해 RDSet을 이용하여 최적화된 명령어를 반환한다 *)
+let rec copy_propagation cfg basic_blocks rd_set =  
+  match basic_blocks with
+  | [] -> []
+  | block :: remaining_blocks ->
+    let optimized_block = copy_propagation_instr cfg block block rd_set in
+    optimized_block @ copy_propagation cfg remaining_blocks rd_set
+
+
+
 let print_rdset rdset =
   RDSet.iter (fun instr ->
     print_string (instr_to_str instr); 
@@ -415,93 +776,42 @@ let print_rdmap rdmap =
     print_newline ()
   ) rdmap
 
-let rec compute_AESetSub cfg block cur_block rd_all rd_set = 
-  match cur_block with
-  | [] -> rd_set
-  | head :: tail ->
-    let rd_in = get_pred_AESet cfg block head rd_all rd_set in
-    let new_rd_set = RDMap.add (head, block) (transfer_AE head rd_in) rd_set in 
-    compute_AESetSub cfg block tail rd_all new_rd_set
-
-let rec compute_AESet cfg basic_blocks rd_all rd_set =
-  let rec iterate previous_rd_set =
-    let new_rd_set =
-      List.fold_left (fun acc_rd_set block ->
-        compute_AESetSub cfg block block rd_all acc_rd_set
-      ) previous_rd_set basic_blocks
-    in
-    if rdmap_equal new_rd_set previous_rd_set then
-      new_rd_set
-    else
-      iterate new_rd_set
-  in
-  iterate rd_set
-
-
-
-let rec find_AE block ir_inst hh rd_set = 
-  let (r1, r2, r3, r4) = ir_inst in
-  let left_str = oprnd_to_str r3 in
-  let binop_str = binop_to_str r2 in
-  let right_str = oprnd_to_str r4 in
-  let inst_str = sprintf "%s %s %s" left_str binop_str right_str in
-  let flag, value = RDSet.fold (fun x (flag, value) -> 
-    if (string_contains (instr_to_str x) r1 = false) && (string_contains (instr_to_str x) inst_str) = true then (true, x)
-    else if (string_contains (instr_to_str x) r1 = true) && (string_contains (instr_to_str x) inst_str) = true then (false, value)
-    else (flag, value)
-  ) rd_set (false, hh) in
-  flag, value
-
-let rec optimize_block_ae cfg block cur_block rd_set =
-  match cur_block with
-  | [] -> []
-  | head :: tail -> 
-    match head with
-    | BinOp (r1, r2, r3, r4) -> 
-      let rd_block = get_pred_RDSet cfg block head RDSet.empty rd_set in
-      let flag, value = find_AE block (r1, r2, r3, r4) head rd_block in
-      if flag = true then 
-        match value with
-        | BinOp (rr, _, _, _) ->
-          [Copy (rr, r1)] @ optimize_block_ae cfg block tail rd_set
-        | _ -> head :: optimize_block_ae cfg block tail rd_set
-      else head :: optimize_block_ae cfg block tail rd_set
-    | _ -> head :: optimize_block_ae cfg block tail rd_set
-
-let rec optimize_AE cfg basic_blocks rd_set = 
-  match basic_blocks with
-  | [] -> []
-  | head :: tail ->
-    optimize_block_ae cfg head head rd_set @ optimize_AE cfg tail rd_set
-  
-let rec all_ae_set ae_set ir_list = 
-  match ir_list with
-  | [] -> ae_set
-  | head :: tail ->
-    all_ae_set (RDSet.add head ae_set) tail
-
 let rec run (ir: ir_code): ir_code =
   let fname, arg_regs, ir_list = ir in
-  let basic_blocks = const_blocks ir_list in
-  let cfg = const_CFG basic_blocks basic_blocks (create_cfg ()) in
-  let rd_set = initial_RDSet basic_blocks RDMap.empty in
-  let rd_set = compute_RDSet cfg basic_blocks rd_set in
-  let ir_RD = optimize_RD cfg basic_blocks rd_set in
+  let basic_blocks = construct_basic_blocks ir_list in
+  let cfg = construct_cfg basic_blocks basic_blocks (create_cfg ()) in
+  let rd_set = initialize_rd_set basic_blocks RDMap.empty in
+  let rd_set = compute_rd_set cfg basic_blocks rd_set in
+  let ir_RD = optimize_blocks_with_rd cfg basic_blocks rd_set in
   let ir_cf = constant_folding ir_RD in
+
+  let basic_blocks = construct_basic_blocks ir_cf in
+  let cfg = construct_cfg basic_blocks basic_blocks (create_cfg ()) in
+  let ae_set = initialize_ae_set basic_blocks AEMap.empty in
+  let ae_all = all_ae_set AESet.empty ir_cf in
+  let ae_set = compute_AESet cfg basic_blocks ae_all ae_set in
+  let ir_ae = optimize_AE cfg basic_blocks ae_all ae_set in
+  let ir_cf = constant_folding ir_ae in
+
+  let basic_blocks = construct_basic_blocks ir_cf in
+  let cfg = construct_cfg basic_blocks basic_blocks (create_cfg ()) in
+  let rd_set = initialize_rd_set basic_blocks RDMap.empty in
+  let rd_set = compute_rd_set cfg basic_blocks rd_set in
+  let ir_cp = copy_propagation cfg basic_blocks rd_set in
+  let ir_cf = constant_folding ir_cp in
+
+  let basic_blocks = construct_basic_blocks ir_cp in
+  let cfg = construct_cfg basic_blocks basic_blocks (create_cfg ()) in
+  let lv_set = initialize_lv_set basic_blocks LVMap.empty in
+  let lv_set = compute_lv_set cfg basic_blocks lv_set in
+  let ir_lv = optimize_blocks_with_lv cfg basic_blocks lv_set in
+  let ir_cf = constant_folding ir_lv in
+  
   if ir_cf = ir_list then
-    let basic_blocks = const_blocks ir_cf in
-    let cfg = const_CFG basic_blocks basic_blocks (create_cfg ()) in
-    let ae_set = initial_RDSet basic_blocks RDMap.empty in
-    let ae_all = all_ae_set RDSet.empty ir_cf in
-    let ae_set = compute_AESet cfg basic_blocks ae_all ae_set in
-    let ir_ae = optimize_AE cfg basic_blocks ae_set in
-    let ir_cf = constant_folding ir_ae in
-    (* print_rdmap ae_set;  *)
     (fname, arg_regs, ir_cf)
   else
     run (fname, arg_regs, ir_cf)
   
-  (* List.iter print_block basic_blocks; *)
-  (*print_cfg cfg;*)
-  (* print_rdmap ae_set;  *)
+  
+
   
