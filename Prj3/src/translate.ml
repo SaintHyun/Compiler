@@ -879,8 +879,7 @@ let rec trans_function sym_tab arg_tab stmts =
           let tmp_ir2 = trans_function sym_tab arg_tab stmt in
           let l1 = create_label() in
           let l2 = create_label() in
-          let l3 = create_label() in
-          (irs @ [Label (l1)] @ tmp_ir1 @ [GotoIf (rbool, l2)] @ [Goto (l3)] @ [Label (l2)] @ tmp_ir2 @ [Goto (l1)] @ [Label (l3)] , sym_tab, arg_tab)
+          (irs @ [Label (l1)] @ tmp_ir1 @ [GotoIfNot (rbool, l2)]  @ tmp_ir2 @ [Goto (l1)] @ [Label (l2)] , sym_tab, arg_tab)
       )
       ([], sym_tab, arg_tab) stmts  
   in

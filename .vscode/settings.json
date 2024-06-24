@@ -2,6 +2,7 @@
     "files.associations": {
         ".fantomasignore": "ignore",
         "*.rmd": "markdown",
-        "prog-3": "c"
+        "prog-3": "c",
+        "prog-4": "c"
     }
 }

@@ -4,9 +4,6 @@ open Printf
 
 exception Error
 
-(* Example code to illustrate how to define your own custom type and define a
- * Set to store them. *)
-
 type cfg = ((instr * instr list), (instr * instr list) list) Hashtbl.t
 
 let create_cfg () : cfg =
@@ -16,8 +13,6 @@ let add_edge g v1 v2 =
   let edges = try Hashtbl.find g v1 with Not_found -> [] in
   Hashtbl.replace g v1 (v2 :: edges)
   
-(* Reaching definition (you can fix the following definition, of course). *)
-type rdef = instr
 
 module RDSet = Set.Make(struct
   type t = instr
@@ -380,20 +375,20 @@ let rec constant_folding ir_list =
 
 
 (* 'initialize_ae_set_for_block' 함수는 블록 내의 각 명령어에 대해 AESet을 초기화한다 *)
-let rec initialize_ae_set_for_block block instructions rd_set = 
+let rec initialize_ae_set_for_block block instructions ae_set = 
   match instructions with
-  | [] -> rd_set
+  | [] -> ae_set
   | instr :: remaining_instrs ->
-    let new_rd_set = AEMap.add (instr, block) AESet.empty rd_set in
-    initialize_ae_set_for_block block remaining_instrs new_rd_set
+    let new_ae_set = AEMap.add (instr, block) AESet.empty ae_set in
+    initialize_ae_set_for_block block remaining_instrs new_ae_set
 
 (* 'initialize_ae_set' 함수는 모든 기본 블록에 대해 AESet을 초기화한다 *)
-let rec initialize_ae_set basic_blocks rd_set = 
+let rec initialize_ae_set basic_blocks ae_set = 
   match basic_blocks with
-  | [] -> rd_set
+  | [] -> ae_set
   | block :: remaining_blocks ->
-    let rd_set = initialize_ae_set_for_block block block rd_set in
-    initialize_ae_set remaining_blocks rd_set
+    let ae_set = initialize_ae_set_for_block block block ae_set in
+    initialize_ae_set remaining_blocks ae_set
 
 let string_contains main_str sub_str =
   let len_main = String.length main_str in
@@ -406,135 +401,133 @@ let string_contains main_str sub_str =
   aux 0
 
 
-let find_r_in_ae_set inst r1 set =
-  AESet.fold (fun rdef ret_set -> 
-    if string_contains (instr_to_str rdef) r1 = true then AESet.add rdef ret_set else ret_set
+let find_reg_in_ae_set current_instr reg set =
+  AESet.fold (fun rdef result_set -> 
+    if string_contains (instr_to_str rdef) reg = true then AESet.add rdef result_set else result_set
   ) set AESet.empty
 
 
 
-let rec transfer_AE cur_ir cur_rd =  (* 한 instr에서 AESet을 계산한다 *)
-  match cur_ir with
+let rec update_ae_set current_instr current_ae_set =  (* 한 instr에서 AESet을 계산한다 *)
+  match current_instr with
   | Set (r, _) ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = AESet.diff cur_rd contain_r in
-    let new_cur_rd = AESet.add cur_ir new_cur_rd in 
-    new_cur_rd
+    let reg_defs = find_reg_in_ae_set current_instr r current_ae_set in
+    let new_ae_set = AESet.diff current_ae_set reg_defs in
+    let new_ae_set = AESet.add current_instr new_ae_set in 
+    new_ae_set
     
   | Copy (r1, r) | Load (r1, r) ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = AESet.diff cur_rd contain_r in
-    if r = r1 then new_cur_rd 
-    else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+    let reg_defs = find_reg_in_ae_set current_instr r current_ae_set in
+    let new_ae_set = AESet.diff current_ae_set reg_defs in
+    if r = r1 then new_ae_set
+    else let new_ae_set = AESet.add current_instr new_ae_set in new_ae_set
 
   | BinOp (r, _, r2, r3) ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = AESet.diff cur_rd contain_r in
+    let reg_defs = find_reg_in_ae_set current_instr r current_ae_set in
+    let new_ae_set = AESet.diff current_ae_set reg_defs in
     (match (r2, r3) with
     | (Reg ra, Reg rb) -> 
-      if r = ra || r = rb then new_cur_rd 
-      else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+      if r = ra || r = rb then new_ae_set 
+      else let new_ae_set = AESet.add current_instr new_ae_set in new_ae_set
     | (Reg ra, _) ->
-      if r = ra then new_cur_rd 
-      else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+      if r = ra then new_ae_set 
+      else let new_ae_set = AESet.add current_instr new_ae_set in new_ae_set
     | (_, Reg rb) ->
-      if r = rb then new_cur_rd 
-      else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
-    | (_, _) -> let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd)
+      if r = rb then new_ae_set 
+      else let new_ae_set = AESet.add current_instr new_ae_set in new_ae_set
+    | (_, _) -> let new_ae_set = AESet.add current_instr new_ae_set in new_ae_set)
 
   | UnOp (r, _, r1) ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = AESet.diff cur_rd contain_r in
+    let reg_defs = find_reg_in_ae_set current_instr r current_ae_set in
+    let new_ae_set = AESet.diff current_ae_set reg_defs in
     (match r1 with
     | Reg ra ->  
-      if r = ra then new_cur_rd 
-      else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
-    | _ -> let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd)
+      if r = ra then new_ae_set 
+      else let new_ae_set = AESet.add current_instr new_ae_set in new_ae_set
+    | _ -> let new_ae_set = AESet.add current_instr new_ae_set in new_ae_set)
 
   | Store (Reg r, r1)  ->
-    let contain_r = find_r_in_ae_set cur_ir r cur_rd in
-    let new_cur_rd = AESet.diff cur_rd contain_r in
-    if r = r1 then new_cur_rd 
-    else let new_cur_rd = AESet.add cur_ir new_cur_rd in new_cur_rd
+    let reg_defs = find_reg_in_ae_set current_instr r current_ae_set in
+    let new_ae_set = AESet.diff current_ae_set reg_defs in
+    if r = r1 then new_ae_set 
+    else let new_ae_set = AESet.add current_instr new_ae_set in new_ae_set
 
-  | _ -> cur_rd
+  | _ -> current_ae_set
 
 
-let get_pred_AESet cfg block cur_instr rd_in rd_set = 
+let get_ae_set_of_predecessor cfg block current_instr ae_in ae_set = 
   let count = ref 0 in
   let ret = Hashtbl.fold (fun key value acc ->
-    if List.mem (cur_instr, block) value then (
+    if List.mem (current_instr, block) value then (
       count := !count + 1;
       try
-        let pred_rd = AEMap.find key rd_set in
-        AESet.inter acc pred_rd
+        let pred_ae = AEMap.find key ae_set in
+        AESet.inter acc pred_ae
       with Not_found ->
         acc
     ) else 
       acc
-  ) cfg rd_in
+  ) cfg ae_in
   in
   if !count = 0 then AESet.empty else ret
 
 
-let rec compute_AESetSub cfg block cur_block rd_all rd_set = 
-  match cur_block with
-  | [] -> rd_set
-  | head :: tail ->
-    let rd_in = get_pred_AESet cfg block head rd_all rd_set in
-    let new_rd_set = AEMap.add (head, block) (transfer_AE head rd_in) rd_set in 
-    compute_AESetSub cfg block tail rd_all new_rd_set
-
-let rec compute_AESet cfg basic_blocks rd_all rd_set =
-  let rec iterate previous_rd_set =
-    let new_rd_set =
-      List.fold_left (fun acc_rd_set block ->
-        compute_AESetSub cfg block block rd_all acc_rd_set
-      ) previous_rd_set basic_blocks
+let rec compute_ae_set_for_block cfg block instructions ae_all ae_set = 
+  match instructions with
+  | [] -> ae_set
+  | instr :: remaining_instrs->
+    let ae_in = get_ae_set_of_predecessor cfg block instr ae_all ae_set in
+    let new_ae_set = AEMap.add (instr, block) (update_ae_set instr ae_in) ae_set in 
+    compute_ae_set_for_block cfg block remaining_instrs ae_all new_ae_set
+    
+let rec compute_ae_set cfg basic_blocks ae_all initial_ae_set = 
+  let rec iterate previous_ae_set =
+    let new_ae_set =
+      List.fold_left (fun acc_ae_set block ->
+        compute_ae_set_for_block cfg block block ae_all acc_ae_set
+      ) previous_ae_set basic_blocks
     in
-    if aemap_equal new_rd_set previous_rd_set then
-      new_rd_set
+    if aemap_equal new_ae_set previous_ae_set then
+      new_ae_set
     else
-      iterate new_rd_set
+      iterate new_ae_set
   in
-  iterate rd_set
+  iterate initial_ae_set
 
 
-
-let rec find_AE block ir_inst hh rd_set = 
-  let (r1, r2, r3, r4) = ir_inst in
+let rec find_available_expression block instr reg ae_set = 
+  let (r1, r2, r3, r4) = instr in
   let left_str = oprnd_to_str r3 in
   let binop_str = binop_to_str r2 in
   let right_str = oprnd_to_str r4 in
-  let inst_str = sprintf "%s %s %s" left_str binop_str right_str in
+  let instr_str = sprintf "%s %s %s" left_str binop_str right_str in
   let flag, value = AESet.fold (fun x (flag, value) -> 
-    if (string_contains (instr_to_str x) r1 = false) && (string_contains (instr_to_str x) inst_str) = true then (true, x)
-    else if (string_contains (instr_to_str x) r1 = true) && (string_contains (instr_to_str x) inst_str) = true then (false, value)
+    if (string_contains (instr_to_str x) instr_str) = true then (true, x)
     else (flag, value)
-  ) rd_set (false, hh) in
+  ) ae_set (false, reg) in
   flag, value
   
-let rec optimize_block_ae cfg block cur_block ae_all rd_set =
-  match cur_block with
+let rec optimize_instructions_with_ae cfg block instructions ae_all ae_set =
+  match instructions with
   | [] -> []
-  | head :: tail -> 
-    match head with
+  | instr :: remaining_instrs -> 
+    match instr with
     | BinOp (r1, r2, r3, r4) -> 
-      let rd_block = get_pred_AESet cfg block head ae_all rd_set in
-      let flag, value = find_AE block (r1, r2, r3, r4) head rd_block in
+      let ae_block = get_ae_set_of_predecessor cfg block instr ae_all ae_set in
+      let flag, value = find_available_expression block (r1, r2, r3, r4) instr ae_block in
       if flag = true then 
         match value with
         | BinOp (rr, _, _, _) ->
-          [Copy (rr, r1)] @ optimize_block_ae cfg block tail ae_all rd_set
-        | _ -> head :: optimize_block_ae cfg block tail ae_all rd_set
-      else head :: optimize_block_ae cfg block tail ae_all rd_set
-    | _ -> head :: optimize_block_ae cfg block tail ae_all rd_set
+          [Copy (rr, r1)] @ optimize_instructions_with_ae cfg block remaining_instrs ae_all ae_set
+        | _ -> instr :: optimize_instructions_with_ae cfg block remaining_instrs ae_all ae_set
+      else instr :: optimize_instructions_with_ae cfg block remaining_instrs ae_all ae_set
+    | _ -> instr :: optimize_instructions_with_ae cfg block remaining_instrs ae_all ae_set
 
-let rec optimize_AE cfg basic_blocks ae_all rd_set = 
+let rec optimize_blocks_with_ae cfg basic_blocks ae_all ae_set = 
   match basic_blocks with
   | [] -> []
-  | head :: tail ->
-    optimize_block_ae cfg head head ae_all rd_set @ optimize_AE cfg tail ae_all rd_set
+  | block :: remaining_blocks ->
+    optimize_instructions_with_ae cfg block block ae_all ae_set @ optimize_blocks_with_ae cfg remaining_blocks ae_all ae_set
   
 let rec all_ae_set ae_set ir_list = 
   match ir_list with
@@ -578,7 +571,7 @@ let get_lv_set_of_successor cfg block current_instr lv_in lv_set =
   lvset successors lv_in lv_set
 
 
-(* 'update_rd_set' 함수는 현재 명령어에서 RDSet을 갱신한다 *)
+(* 'update_lv_set' 함수는 현재 명령어에서 LVSet을 갱신한다 *)
 let rec update_lv_set current_instr current_lv_set =  
   match current_instr with
   | Set (r1, _ ) ->
@@ -669,7 +662,7 @@ let find_liveness reg lv_in =
   if LVSet.mem reg lv_in = false then true
   else false
 
-(* 'optimize_instructions_with_rd' 함수는 블록 내의 각 명령어를 RDSet을 이용하여 최적화한다 *)
+(* 'optimize_instructions_with_lv' 함수는 블록 내의 각 명령어를 LVSet을 이용하여 최적화한다 *)
 let rec optimize_instructions_with_lv cfg block instructions lv_set =
   match instructions with
   | [] -> []
@@ -682,7 +675,7 @@ let rec optimize_instructions_with_lv cfg block instructions lv_set =
       else [instr] @ optimize_instructions_with_lv cfg block remaining_instrs lv_set
     | _ -> [instr] @ optimize_instructions_with_lv cfg block remaining_instrs lv_set
 
-(* 'optimize_blocks_with_rd' 함수는 모든 기본 블록에 대해 RDSet을 이용하여 최적화된 명령어를 반환한다 *)
+(* 'optimize_blocks_with_lv' 함수는 모든 기본 블록에 대해 LVSet을 이용하여 최적화된 명령어를 반환한다 *)
 let rec optimize_blocks_with_lv cfg basic_blocks lv_set = 
   match basic_blocks with
   | [] -> []
@@ -690,21 +683,8 @@ let rec optimize_blocks_with_lv cfg basic_blocks lv_set =
     let optimized_block = optimize_instructions_with_lv cfg block block lv_set in
     optimized_block @ optimize_blocks_with_lv cfg remaining_blocks lv_set
 
-let print_rdset rdset =
-  LVSet.iter (fun instr ->
-    printf "%s, " (instr); 
-  ) rdset
 
-let print_lvmap rdmap =
-  LVMap.iter (fun key rdset ->
-    let key_instr, _ = key in
-    printf "LVSet for instr: %s \n" (instr_to_str key_instr);
-    print_string "LV: ";
-    print_rdset rdset; 
-    print_newline ()
-  ) rdmap
-
-(* 'find_reaching_definition' 함수는 레지스터의 RDSet 내의 정의를 찾는다 *)
+(* 'find_reaching_definition_cp' copy propagation을 위한 함수이며, `레지스터의 RDSet 내의 정의를 찾아서 최적화 가능 여부를 판정한다. *)
 let rec find_reaching_definition_cp block reg rd_set = 
   let flag, value = RDSet.fold (fun x (flag, value) -> 
     match x with
@@ -718,7 +698,7 @@ let rec find_reaching_definition_cp block reg rd_set =
   ) rd_set (false, "") in
   flag, value
 
-(* 'optimize_instructions_with_rd' 함수는 블록 내의 각 명령어를 RDSet을 이용하여 최적화한다 *)
+(* 'copy_propagation_instr' 함수는 블록 내의 각 명령어를 RDSet을 이용하여 최적화한다 *)
 let rec copy_propagation_instr cfg block instructions rd_set =
   match instructions with
   | [] -> []
@@ -759,23 +739,6 @@ let rec copy_propagation cfg basic_blocks rd_set =
     let optimized_block = copy_propagation_instr cfg block block rd_set in
     optimized_block @ copy_propagation cfg remaining_blocks rd_set
 
-
-
-let print_rdset rdset =
-  RDSet.iter (fun instr ->
-    print_string (instr_to_str instr); 
-    print_newline ()
-  ) rdset
-
-let print_rdmap rdmap =
-  RDMap.iter (fun key rdset ->
-    let key_instr, _ = key in
-    printf "RDSet for instr: %s \n" (instr_to_str key_instr);
-    print_string "Reaching Definitions:\n";
-    print_rdset rdset; 
-    print_newline ()
-  ) rdmap
-
 let rec run (ir: ir_code): ir_code =
   let fname, arg_regs, ir_list = ir in
   let basic_blocks = construct_basic_blocks ir_list in
@@ -789,8 +752,8 @@ let rec run (ir: ir_code): ir_code =
   let cfg = construct_cfg basic_blocks basic_blocks (create_cfg ()) in
   let ae_set = initialize_ae_set basic_blocks AEMap.empty in
   let ae_all = all_ae_set AESet.empty ir_cf in
-  let ae_set = compute_AESet cfg basic_blocks ae_all ae_set in
-  let ir_ae = optimize_AE cfg basic_blocks ae_all ae_set in
+  let ae_set = compute_ae_set cfg basic_blocks ae_all ae_set in
+  let ir_ae = optimize_blocks_with_ae cfg basic_blocks ae_all ae_set in
   let ir_cf = constant_folding ir_ae in
 
   let basic_blocks = construct_basic_blocks ir_cf in
